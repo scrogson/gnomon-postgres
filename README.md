@@ -10,7 +10,7 @@ The package is `gnomon-postgres` (the name `gnomon` is taken on crates.io); the 
 
 ```toml
 [dependencies]
-gnomon-postgres = { git = "https://github.com/scrogson/gnomon-rs" }
+gnomon-postgres = { git = "https://github.com/scrogson/gnomon-postgres" }
 ```
 
 Requires the extension at SQL API 2 (gnomon 1.0.x) on PostgreSQL 15–18, Rust 1.94+, and tokio.
