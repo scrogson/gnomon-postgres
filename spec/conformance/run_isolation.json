@@ -1,0 +1,17 @@
+{
+  "name": "runs that share a login cannot read each other; discard drops the branch",
+  "setup": [
+    "create table note (id int primary key, body text not null)",
+    "insert into note values (1, 'main')",
+    "select gnomon.track('note')"
+  ],
+  "steps": [
+    {"call": "startRun", "args": {"task": "a"}, "as": "a"},
+    {"call": "startRun", "args": {"task": "b"}, "as": "b"},
+    {"call": "run.sql", "on": "a", "args": {"statement": "update note set body = 'secret of a' where id = 1"}},
+    {"call": "run.sql", "on": "b", "args": {"statement": "select body from note where id = 1"}, "expect": {"rows": [{"body": "main"}]}},
+    {"call": "run.sql", "on": "b", "args": {"statement": "select gnomon.use(gnomon.current_branch())"}},
+    {"call": "run.discard", "on": "a"},
+    {"call": "app.sql", "args": {"statement": "select body from note where id = 1"}, "expect": {"rows": [{"body": "main"}]}}
+  ]
+}

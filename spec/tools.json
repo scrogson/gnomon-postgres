@@ -1,0 +1,40 @@
+{
+  "version": 1,
+  "tools": [
+    {
+      "name": "sql",
+      "description": "Run one SQL statement on your working copy of the database (a branch). Reads see your own changes; writes never reach the real data until a person accepts them. One statement per call. Upserts (INSERT ... ON CONFLICT) are not supported unless the server has gnomon's C module: write an UPDATE, then an INSERT ... SELECT ... WHERE NOT EXISTS. Results are cut at a row limit; `truncated` says when.",
+      "input": {"type": "object", "properties": {"statement": {"type": "string", "description": "one SQL statement"}, "reason": {"type": "string", "description": "why, for writes: kept with the change"}}, "required": ["statement"]}
+    },
+    {
+      "name": "describe",
+      "description": "Describe the database: tables you can read, their columns and keys, foreign keys both ways, which tables you can change, masked columns, row estimates. Call it before writing SQL.",
+      "input": {"type": "object", "properties": {"schema": {"type": "string", "description": "one schema, default all"}}, "required": []}
+    },
+    {
+      "name": "diff",
+      "description": "What you have changed so far, field by field.",
+      "input": {"type": "object", "properties": {}, "required": []}
+    },
+    {
+      "name": "dry_run",
+      "description": "Try statements without keeping them: returns the changes they would make, the checks and any error. Nothing is kept.",
+      "input": {"type": "object", "properties": {"statements": {"type": "array", "items": {"type": "string"}}}, "required": ["statements"]}
+    },
+    {
+      "name": "checkpoint",
+      "description": "Remember the current state of your changes under a name, to rewind to it later.",
+      "input": {"type": "object", "properties": {"name": {"type": "string"}}, "required": ["name"]}
+    },
+    {
+      "name": "rewind",
+      "description": "Undo every change you made since a checkpoint.",
+      "input": {"type": "object", "properties": {"name": {"type": "string"}}, "required": ["name"]}
+    },
+    {
+      "name": "done",
+      "description": "Say you are finished: a person reviews your changes and accepts or rejects them. Summarize what you did and why.",
+      "input": {"type": "object", "properties": {"summary": {"type": "string"}}, "required": ["summary"]}
+    }
+  ]
+}

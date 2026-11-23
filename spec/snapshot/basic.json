@@ -1,0 +1,90 @@
+{
+  "ignore": [
+    "created_at"
+  ],
+  "foreign_keys": [
+    {
+      "table": "public.orders",
+      "columns": [
+        "customer"
+      ],
+      "references": "public.customers",
+      "referenced_columns": [
+        "id"
+      ]
+    }
+  ],
+  "diff": [
+    {
+      "table": "public.customers",
+      "key": {
+        "id": 41
+      },
+      "kind": "insert",
+      "col": null,
+      "old": null,
+      "new": {
+        "id": 41,
+        "email": "a@x.io",
+        "created_at": "2026-01-01"
+      }
+    },
+    {
+      "table": "public.orders",
+      "key": {
+        "id": 900
+      },
+      "kind": "insert",
+      "col": null,
+      "old": null,
+      "new": {
+        "id": 900,
+        "customer": 41,
+        "total": 5
+      }
+    },
+    {
+      "table": "public.orders",
+      "key": {
+        "id": 7
+      },
+      "kind": "update",
+      "col": "total",
+      "old": 10,
+      "new": 12
+    },
+    {
+      "table": "public.orders",
+      "key": {
+        "id": 7
+      },
+      "kind": "update",
+      "col": "created_at",
+      "old": "x",
+      "new": "y"
+    },
+    {
+      "table": "public.customers",
+      "key": {
+        "id": 3
+      },
+      "kind": "delete",
+      "col": null,
+      "old": {
+        "id": 3,
+        "email": "b@x.io",
+        "created_at": "2025-01-01"
+      },
+      "new": null
+    }
+  ],
+  "expected": [
+    "public.customers <customers:1> delete",
+    "public.customers <customers:2> insert email = \"a@x.io\"",
+    "public.customers <customers:2> insert id = <customers:2>",
+    "public.orders <orders:1> update total: 10 -> 12",
+    "public.orders <orders:2> insert customer = <customers:2>",
+    "public.orders <orders:2> insert id = <orders:2>",
+    "public.orders <orders:2> insert total = 5"
+  ]
+}

@@ -1,0 +1,13 @@
+# Test servers: gnomon with its C module (54329) and the SQL core only (54330). Trust auth, local only.
+services:
+  gnomon:
+    image: ghcr.io/bitsinfra/gnomon/postgres:v1.0.1
+    environment:
+      POSTGRES_HOST_AUTH_METHOD: trust
+    ports: ["127.0.0.1:54329:5432"]
+  gnomon-sql:
+    image: ghcr.io/bitsinfra/gnomon/postgres:v1.0.1
+    command: ["postgres", "-c", "shared_preload_libraries="]
+    environment:
+      POSTGRES_HOST_AUTH_METHOD: trust
+    ports: ["127.0.0.1:54330:5432"]

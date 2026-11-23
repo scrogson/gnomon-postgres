@@ -1,0 +1,32 @@
+[package]
+name = "gnomon-postgres"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.94"
+description = "Rust client for Gnomon, git for Postgres data: runs, review, branches and history over sqlx"
+license = "PostgreSQL"
+repository = "https://github.com/scrogson/gnomon-rs"
+keywords = ["postgres", "gnomon", "branching", "agents", "sqlx"]
+categories = ["database"]
+include = ["src/**", "spec/tools.json", "spec/snapshot/*.json", "spec/LICENSE", "LICENSE", "README.md", "Cargo.toml"]
+
+[lib]
+name = "gnomon"
+
+[dependencies]
+sqlx = { version = "0.9", default-features = false, features = ["postgres", "runtime-tokio", "json", "uuid", "chrono"] }
+# float_roundtrip makes float parsing exact; unbounded_depth only lifts the 128 limit where
+# json.rs asks (with its own cap, on serde_stacker's growing stack)
+serde_json = { version = "1", features = ["float_roundtrip", "unbounded_depth"] }
+serde_stacker = "0.1"
+serde = { version = "1", features = ["derive"] }
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
+tokio = { version = "1", features = ["time", "sync"] }
+tracing = "0.1"
+url = "2"
+regex = "1"
+chrono = { version = "0.4", default-features = false, features = ["std", "serde"] }
+uuid = "1"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }
