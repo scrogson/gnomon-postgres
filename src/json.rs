@@ -28,6 +28,95 @@ pub fn parse_json(text: Option<&str>) -> Result<Value> {
     }
 }
 
+/// [`parse_json`], except that a container nested past the cap becomes a string saying so,
+/// instead of failing the whole value. For diffs: a row with one deep column still shows the
+/// rest.
+pub(crate) fn parse_json_capped(text: Option<&str>) -> Result<Value> {
+    match text {
+        None => Ok(Value::Null),
+        Some(t) => {
+            let (quoted, depth) = quote_inexact_numbers(t);
+            if depth > MAX_DEPTH {
+                return Ok(from_str_deep(&cut_deeper_than(&quoted, MAX_DEPTH))?);
+            }
+            Ok(from_str_deep(&quoted)?)
+        }
+    }
+}
+
+/// What stands in for a container nested past [`MAX_DEPTH`]: a string naming a hash of the text
+/// it replaces, so two different deep values never look the same in a diff.
+fn too_deep(cut: &str) -> String {
+    // FNV-1a: stable across builds and platforms, unlike std's hasher
+    let mut h: u64 = 0xcbf29ce484222325;
+    for b in cut.bytes() {
+        h = (h ^ u64::from(b)).wrapping_mul(0x100000001b3);
+    }
+    format!(
+        "\"<JSON nested more than {MAX_DEPTH} levels deep (#{h:016x}): cast it to ::text to read it>\""
+    )
+}
+
+/// Valid JSON text with every container that would open past `max` levels replaced by
+/// [`too_deep`].
+fn cut_deeper_than(s: &str, max: usize) -> String {
+    let b = s.as_bytes();
+    let mut out = String::with_capacity(s.len());
+    let (mut depth, mut i, mut from) = (0usize, 0usize, 0usize);
+    let mut in_str = false;
+    while i < b.len() {
+        let c = b[i];
+        if in_str {
+            match c {
+                b'\\' => i += 1,
+                b'"' => in_str = false,
+                _ => {}
+            }
+        } else {
+            match c {
+                b'"' => in_str = true,
+                b'[' | b'{' if depth == max => {
+                    out.push_str(&s[from..i]);
+                    let start = i;
+                    // skip to the matching close
+                    let (mut d, mut q) = (0usize, false);
+                    while i < b.len() {
+                        let c = b[i];
+                        if q {
+                            match c {
+                                b'\\' => i += 1,
+                                b'"' => q = false,
+                                _ => {}
+                            }
+                        } else {
+                            match c {
+                                b'"' => q = true,
+                                b'[' | b'{' => d += 1,
+                                b']' | b'}' => {
+                                    d -= 1;
+                                    if d == 0 {
+                                        break;
+                                    }
+                                }
+                                _ => {}
+                            }
+                        }
+                        i += 1;
+                    }
+                    out.push_str(&too_deep(&s[start..(i + 1).min(s.len())]));
+                    from = i + 1;
+                }
+                b'[' | b'{' => depth += 1,
+                b']' | b'}' => depth = depth.saturating_sub(1),
+                _ => {}
+            }
+        }
+        i += 1;
+    }
+    out.push_str(&s[from.min(s.len())..]);
+    out
+}
+
 /// The deepest nesting parsed. serde_json stops at 128; past this, recursive code anywhere
 /// (drop, Display, a caller's own) risks overflowing a 2 MiB thread stack.
 const MAX_DEPTH: usize = 400;
@@ -504,6 +593,40 @@ fn numeric_binary_to_text(b: &[u8]) -> std::result::Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn deep_values_are_cut_not_failed() {
+        let deep = |n: usize| format!("{}1{}", "[".repeat(n), "]".repeat(n));
+        let v = parse_json_capped(Some(&format!(
+            r#"{{"a": "x[{{\"]\\", "b": {}, "c": 1.10}}"#,
+            deep(MAX_DEPTH + 50)
+        )))
+        .unwrap();
+        assert_eq!(v["a"], r#"x[{"]\"#);
+        assert_eq!(v["c"], "1.10");
+        let mut b = &v["b"];
+        let mut n = 1;
+        while let Some(a) = b.as_array() {
+            b = &a[0];
+            n += 1;
+        }
+        assert_eq!(n, MAX_DEPTH, "{b}");
+        assert!(b.as_str().unwrap().contains("::text"));
+        let two = |s: &str| {
+            parse_json_capped(Some(&format!(
+                "{}{s}{}",
+                "[".repeat(MAX_DEPTH + 5),
+                "]".repeat(MAX_DEPTH + 5)
+            )))
+            .unwrap()
+        };
+        assert_ne!(two("1"), two("2"), "deep values that differ stay different");
+        assert_eq!(two("1"), two("1"));
+        assert_eq!(
+            parse_json_capped(Some(&deep(MAX_DEPTH))).unwrap(),
+            parse_json(Some(&deep(MAX_DEPTH))).unwrap()
+        );
+    }
 
     #[test]
     fn lossless() {

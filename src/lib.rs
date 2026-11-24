@@ -31,6 +31,8 @@
 //! # Ok(()) }
 //! ```
 
+#![forbid(unsafe_code)]
+
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -41,6 +43,7 @@ use sqlx::{AssertSqlSafe, PgPool, Row};
 use tokio::sync::OnceCell;
 
 mod branches;
+mod dry;
 mod error;
 mod json;
 mod review;
@@ -51,6 +54,7 @@ pub mod tools;
 
 pub use branches::{Branches, CreateBranch};
 pub use error::{Error, ErrorKind, Result, slug_of};
+use json::parse_json_capped;
 pub use json::{parse_json, row_to_json, row_to_json_lossy, stable_json};
 pub use review::{CommentAt, Request, Requests};
 pub use run::{MergeResult, Run, RunState, RunTx, SqlOptions, SqlResult, StartRun};
@@ -120,6 +124,9 @@ pub struct Options {
     pub lock_timeout: Duration,
     /// Rows a run statement returns before `truncated` (1000).
     pub max_rows: usize,
+    /// Bytes of row data a run statement keeps before `truncated` (16 MiB). One value larger
+    /// than this still arrives whole: the driver reads each row in full.
+    pub max_bytes: usize,
     /// Skip the `gnomon.api_version()` check (tests of older servers).
     pub skip_version_check: bool,
     /// The database's connection string (host, port, database), for [`Run::url`].
@@ -133,6 +140,7 @@ impl Default for Options {
             statement_timeout: Duration::from_secs(30),
             lock_timeout: Duration::from_secs(5),
             max_rows: 1000,
+            max_bytes: 16 << 20,
             skip_version_check: false,
             url: None,
             on_statement: None,
@@ -146,6 +154,7 @@ impl std::fmt::Debug for Options {
             .field("statement_timeout", &self.statement_timeout)
             .field("lock_timeout", &self.lock_timeout)
             .field("max_rows", &self.max_rows)
+            .field("max_bytes", &self.max_bytes)
             .field("skip_version_check", &self.skip_version_check)
             .field("url", &self.url.as_ref().map(|_| "<set>"))
             .field("on_statement", &self.on_statement.is_some())
@@ -176,6 +185,10 @@ impl GnomonBuilder {
     }
     pub fn max_rows(mut self, n: usize) -> Self {
         self.options.max_rows = n;
+        self
+    }
+    pub fn max_bytes(mut self, n: usize) -> Self {
+        self.options.max_bytes = n;
         self
     }
     pub fn skip_version_check(mut self, yes: bool) -> Self {
@@ -224,6 +237,25 @@ impl std::fmt::Debug for Gnomon {
             .field("options", &self.inner.options)
             .finish()
     }
+}
+
+/// One row of `select tbl::text, key::text, kind, col, old::text, new::text from gnomon.diff(..)`.
+pub(crate) fn change_from_row(r: &sqlx::postgres::PgRow) -> Result<Change> {
+    use sqlx::Row;
+    let kind: String = r.try_get(2)?;
+    Ok(Change {
+        table: r.try_get(0)?,
+        key: parse_json_capped(r.try_get::<Option<&str>, _>(1)?)?,
+        kind: match kind.as_str() {
+            "insert" => ChangeKind::Insert,
+            "update" => ChangeKind::Update,
+            "delete" => ChangeKind::Delete,
+            k => return Err(Error::other(format!("unknown change kind {k}"))),
+        },
+        column: r.try_get(3)?,
+        old: parse_json_capped(r.try_get::<Option<&str>, _>(4)?)?,
+        new: parse_json_capped(r.try_get::<Option<&str>, _>(5)?)?,
+    })
 }
 
 /// What kind of change a diff row is.
@@ -628,24 +660,35 @@ impl Gnomon {
                 bind![a, b],
             )
             .await?;
-        rows.iter()
-            .map(|r| {
-                let kind: String = r.try_get(2)?;
-                Ok(Change {
-                    table: r.try_get(0)?,
-                    key: parse_json(r.try_get::<Option<&str>, _>(1)?)?,
-                    kind: match kind.as_str() {
-                        "insert" => ChangeKind::Insert,
-                        "update" => ChangeKind::Update,
-                        "delete" => ChangeKind::Delete,
-                        k => return Err(Error::other(format!("unknown change kind {k}"))),
-                    },
-                    column: r.try_get(3)?,
-                    old: parse_json(r.try_get::<Option<&str>, _>(4)?)?,
-                    new: parse_json(r.try_get::<Option<&str>, _>(5)?)?,
-                })
-            })
-            .collect()
+        rows.iter().map(change_from_row).collect()
+    }
+
+    /// Replace table oids (as text) with names as the app login writes them, as
+    /// `gnomon.diff` on the app login would.
+    pub(crate) async fn name_tables(&self, diff: &mut [Change]) -> Result<()> {
+        let mut oids: Vec<i64> = diff.iter().filter_map(|c| c.table.parse().ok()).collect();
+        oids.sort_unstable();
+        oids.dedup();
+        if oids.is_empty() {
+            return Ok(());
+        }
+        let rows = self
+            .app_rows(
+                "select o::text, o::oid::regclass::text from unnest($1::int8[]) o",
+                bind![oids],
+            )
+            .await?;
+        let mut names = std::collections::HashMap::new();
+        for r in &rows {
+            use sqlx::Row;
+            names.insert(r.try_get::<String, _>(0)?, r.try_get::<String, _>(1)?);
+        }
+        for c in diff {
+            if let Some(n) = names.get(&c.table) {
+                c.table = n.clone();
+            }
+        }
+        Ok(())
     }
 
     /// What a gnomon error means and what to do about it (`gnomon.explain_error`); `None` when

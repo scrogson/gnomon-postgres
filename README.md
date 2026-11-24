@@ -60,15 +60,25 @@ Each run statement goes out on the runs login in an envelope: `gnomon.begin(bran
 the extended protocol. The database refuses a second statement, writes outside the run's branch,
 reads of other runs' branches and of the real tables, and merges.
 
+Every runs-login transaction starts on a reset connection (what `DISCARD ALL` does, with
+`DISCARD TEMP` only when a run left temporary objects, and without dropping cached plans), so
+temporary tables and views, settings, cursors, prepared statements and advisory locks one run
+leaves in a session never reach the next run that gets the connection. Settings and `SET ROLE`
+that your own `after_connect` hook puts on the runs pool are reset too: give settings as
+connection options instead, and connect the runs pool as the runs login itself. A call cancelled
+mid-statement (a dropped future, a timeout) rolls back on a background task before its
+connection returns to the pool, so the server never holds more runs-login backends than the
+pool allows.
+
 ### What a run does
 
 | | |
 |---|---|
-| `run.sql(s)`, `run.sql_with(s, args![..])`, `run.sql_opts(s, args, SqlOptions { reason, timeout, max_rows })` | One statement on the branch. Rows are capped (`truncated`). A 40001 is retried 3 times with backoff. |
-| `run.transaction(reason, \|tx\| Box::pin(async move { .. }))` | Several statements in one envelope, all or nothing, rows not capped. Retried by running the closure again. |
+| `run.sql(s)`, `run.sql_with(s, args![..])`, `run.sql_opts(s, args, SqlOptions { reason, timeout, max_rows, max_bytes })` | One statement on the branch. Rows are capped at 1000 rows and 16 MiB of row data (`truncated`); rows past either cap are read and dropped, so a single row larger than the byte cap is still read into memory before it is dropped. A 40001 is retried 3 times with backoff. Transaction control (`COMMIT`, `PREPARE TRANSACTION`, ...) is refused. |
+| `run.transaction(reason, \|tx\| Box::pin(async move { .. }))` | Several statements in one envelope, all or nothing, rows not capped. Retried by running the closure again. `BEGIN`, `COMMIT`, `ROLLBACK` (but not `ROLLBACK TO`) and the like are refused, and the transaction is checked to be the same one after every statement. |
 | `run.diff()`, `run.summary()`, `run.checks()` | What changed, per field; changes, checks, conflicts and warnings in one call. |
-| `run.merge()`, `run.submit(title)`, `run.discard()` | Into the real data, to a person, or away. A conflict is `ErrorKind::MergeConflict { merge_id, conflicts }`. |
-| `run.checkpoint(name)`, `run.rewind(name)`, `run.dry_run(&stmts, checks)` | Savepoints across calls, and trying statements without keeping them. |
+| `run.merge()`, `run.submit(title)`, `run.discard()` | Into the real data, to a person, or away. A conflict is `ErrorKind::MergeConflict { merge_id, conflicts }`. Submitting twice (two `done` calls, even at once) returns the same request. `submit`, `merge` and `discard` wait for the run's calls in flight. |
+| `run.checkpoint(name)`, `run.rewind(name)`, `run.dry_run(&stmts, checks)` | Savepoints across calls, and trying statements without keeping them. All three run on the runs login in the run's envelope; `dry_run` always rolls back (see below). |
 | `run.url(base)`, `run.connect(base)` | A connection string (URL or libpq keywords), or an open `PgConnection` (URL base only), for a login of the run's own, confined to its branch. |
 | `run.describe(schema)` | The database as the run sees it. |
 
@@ -78,6 +88,20 @@ intervals, bytea, and arrays of the common scalars. Any other type (inet, money,
 an error telling you to cast it with `::text`; `row_to_json_lossy` puts a placeholder string there
 instead. The `sql` tool uses the lossy form, so a statement that committed is never reported to a
 model as failed.
+
+### `dry_run` differs from the spec
+
+The spec maps `run.dryRun` to `gnomon.dry_run(statements, branch)`. That function refuses a
+confined login, so an SDK has to call it on the app login, where a model's statements would run
+with the application's privileges and no statement timeout. This crate runs the statements on the
+runs login instead, inside the run's envelope, and rolls back. Each statement is sent as a bound
+parameter (never spliced into SQL) and runs through plpgsql's `EXECUTE` in a fixed `DO` block, as
+`gnomon.dry_run` does, so a `COMMIT` or `ROLLBACK` among them cannot end the transaction. The
+run's statement and lock timeouts are applied again after every statement, so a `SET` among them
+cannot lift them. The result has the same shape
+(`ok`, `statements`, `summary`, `diff`, `checks`, or `error`/`sqlstate`/`statement`/`explanation`);
+`diff` is worked out from the run's diff before and after, so it holds only what the statements
+change, relative to the run's branch.
 
 ## Review
 
@@ -94,6 +118,9 @@ req.undo().await?;
 req.wait(Duration::from_secs(300)).await?;          // gnomon.wait_for_review
 req.comment("why zero?", CommentAt { table: Some("orders".into()), ..Default::default() }).await?;
 ```
+
+`Request::merge` fails like `Run::merge`: a conflict is `ErrorKind::MergeConflict`, and any
+merge that did not apply is an error.
 
 ## Core
 
@@ -125,7 +152,7 @@ golden file. It also has `assert_no_changes` and `assert_changed`.
 
 ## Errors
 
-`gnomon::Error` has `kind()`, `code()` (the stable `[gnomon:<slug>]`), `sqlstate()`, `hint()` and
+`gnomon::Error` has `kind()`, `code()` (the stable `[gnomon:<slug>]`, read from the hint), `sqlstate()`, `hint()` and
 the driver's error as `source()`. The kinds are the spec's classes: `Serialization`, `Permission`,
 `BranchClosed`, `StatementTimeout`, `UnsupportedOnBranch`, `NotRouted`, `MergeConflict`,
 `ChecksFailed`, `OverQuota`, `IncompatibleVersion`, `Other`. The client checks
@@ -147,7 +174,27 @@ handling (`f64` under `#[serde(flatten)]` or `untagged`) for every crate in your
 BC dates print as ISO years (`44 BC` is `-0043`), and fractional seconds of times and timestamps
 are padded to 3 or 6 digits (`12:00:00.500`, where PostgreSQL prints `12:00:00.5`). Cast with
 `::text` when you need the server's exact text. JSON nested more than 400 levels deep is an
-error rather than a risk of overflowing the stack.
+error rather than a risk of overflowing the stack. In a diff it does not fail the diff: the part
+past 400 levels becomes a string saying so, with a hash of what it replaces (so a change past
+the cap still shows as a change), and the rest of the row is shown.
+
+## Security notes
+
+Isolation between runs rests on the database and on this client sending `gnomon.begin` first and
+one statement after it. Some limits belong to gnomon itself (1.0.1), not to this crate:
+
+- A login from `Run::url` / `Run::connect` is a member of the shared runs role. It can
+  `set role` to it and then `gnomon.begin` another run's branch. Treat it as confined to the runs
+  role, not to one run.
+- The runs role can `alter role current_user set ...`. Such a setting applies to every new runs
+  connection and survives any reset of the session: one statement such as
+  `alter role current_user set default_transaction_read_only = on` makes every later run fail
+  until an admin runs `alter role <runs login> reset all`.
+- The runs login can list every branch name and task.
+- A run's statement can call `gnomon.checkpoint(name, 'main')` and create a tag on main.
+- Error kinds on the runs login are advisory: a statement can raise any SQLSTATE, and put a
+  `[gnomon:<slug>]` code in its hint (the crate reads the code from the hint only, as the spec
+  says, so a slug in a message is ignored). A raised 40001 is retried like a real one. A merge conflict is only ever read from the merge itself.
 
 ## Developing
 

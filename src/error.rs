@@ -168,9 +168,10 @@ impl std::error::Error for Error {
 
 static SLUG: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\[gnomon:([a-z_]+)\]").unwrap());
 
-/// The `[gnomon:<slug>]` in a hint or message, if any.
+/// The `[gnomon:<slug>]` in a hint or message, if any. gnomon puts it last, after any text of
+/// the caller's (a table name) that the hint quotes, so the last one is read.
 pub fn slug_of(text: &str) -> Option<String> {
-    SLUG.captures(text).map(|c| c[1].to_string())
+    SLUG.captures_iter(text).last().map(|c| c[1].to_string())
 }
 
 /// Classify an error by SQLSTATE and slug, in the same precedence order as every gnomon SDK.
@@ -205,7 +206,9 @@ impl From<sqlx::Error> for Error {
             }
             other => (other.to_string(), None, None),
         };
-        let slug = slug_of(&format!("{} {}", hint.as_deref().unwrap_or(""), message));
+        // the slug is read from the hint only, where gnomon puts it (spec: Errors), so text a
+        // statement puts in its message cannot pass for a gnomon refusal
+        let slug = hint.as_deref().and_then(slug_of);
         let kind = classify(sqlstate.as_deref(), slug.as_deref());
         let message = if kind == ErrorKind::UnsupportedOnBranch {
             format!(
@@ -234,6 +237,15 @@ impl From<serde_json::Error> for Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_last_slug_is_gnomons() {
+        assert_eq!(
+            slug_of(r#"Track it with gnomon.track('public."[gnomon:over_quota]"'). [gnomon:not_tracked]"#)
+                .as_deref(),
+            Some("not_tracked")
+        );
+    }
 
     #[test]
     fn precedence() {

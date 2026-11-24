@@ -126,14 +126,11 @@ impl Request {
     }
 
     /// Merge the request's branch and close it. Returns the merge's id.
+    /// Conflicts are an error of kind [`ErrorKind::MergeConflict`](crate::ErrorKind), as for
+    /// [`Run::merge`](crate::Run::merge); so is any merge that did not apply.
     pub async fn merge(&self) -> Result<i64> {
         let b = self.branch().await?;
-        self.g
-            .app_value(
-                "select gnomon.merge($1, null, 'atomic', null, null, null, true)::int8",
-                bind![b],
-            )
-            .await
+        Ok(crate::run::merge_branch(&self.g, &b, true).await?.merge)
     }
 
     /// Undo the request's merge (`gnomon.undo_merge`).

@@ -55,7 +55,7 @@ fn text(v: Option<&Value>) -> String {
 }
 
 /// Ascending key order: column by column, numbers numerically, text by code point.
-fn cmp_key(a: &Value, b: &Value) -> Ordering {
+pub(crate) fn cmp_key(a: &Value, b: &Value) -> Ordering {
     let empty = Map::new();
     let ao = a.as_object().unwrap_or(&empty);
     let bo = b.as_object().unwrap_or(&empty);
